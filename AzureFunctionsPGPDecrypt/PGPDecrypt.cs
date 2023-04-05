@@ -9,6 +9,9 @@ using System;
 using System.Text;
 using Microsoft.Extensions.Logging;
 using Org.BouncyCastle.Bcpg.OpenPgp;
+using Azure.Storage;
+using Azure.Storage.Blobs;
+using Azure.Storage.Blobs.Models;
 
 namespace AzureFunctionsPGPDecrypt
 {
@@ -30,10 +33,25 @@ namespace AzureFunctionsPGPDecrypt
             byte[] privateKeyBytes = Convert.FromBase64String(privateKeyBase64);
             string privateKey = Encoding.UTF8.GetString(privateKeyBytes);
 
-            try
-            {
-                Stream decryptedData = await DecryptAsync(req.Body, privateKey, passPhrase);
-                return new OkObjectResult(decryptedData);
+            // TODO: Move this to environment
+            string connectionString;
+            string inputContainerName;
+            string outputContainerName;
+            try{
+                BlobContainerClient inputContainer = new BlobContainerClient(connectionString,inputContainerName);
+                BlobClient blobClient = inputContainer.GetBlobClient("test.pgp");
+                BlobDownloadStreamingResult ms = await blobClient.DownloadStreamingAsync();
+
+                using(Stream inputStream = new MemoryStream()) {
+                    ms.Content.CopyTo(inputStream);
+                    inputStream.Seek(0, SeekOrigin.Begin);
+                    Stream decryptedData = await DecryptAsync(inputStream, privateKey, passPhrase);
+                    BlobContainerClient outputBlobContainer = new BlobContainerClient(connectionString, outputContainerName);
+                    BlobClient outputBlobClient = outputBlobContainer.GetBlobClient("test.txt");
+                    await outputBlobClient.UploadAsync(decryptedData, true);
+
+                    return new OkObjectResult(decryptedData);
+                }
             }
             catch (PgpException pgpException)
             {
@@ -43,14 +61,16 @@ namespace AzureFunctionsPGPDecrypt
 
         private static async Task<Stream> DecryptAsync(Stream inputStream, string privateKey, string passPhrase)
         {
-            using (PGP pgp = new PGP())
+            // TODO: move to env
+            string pass;
+            EncryptionKeys encryptionKeys = new EncryptionKeys(privateKey, pass);
+
+            using (PGP pgp = new PGP(encryptionKeys))
             {
                 Stream outputStream = new MemoryStream();
 
-                using (inputStream)
-                using (Stream privateKeyStream = privateKey.ToStream())
-                {
-                    await pgp.DecryptStreamAsync(inputStream, outputStream, privateKeyStream, passPhrase);
+                using (inputStream) {
+                    await pgp.DecryptStreamAsync(inputStream, outputStream);
                     outputStream.Seek(0, SeekOrigin.Begin);
                     return outputStream;
                 }
